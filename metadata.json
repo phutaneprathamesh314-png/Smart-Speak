@@ -1,0 +1,6 @@
+{
+  "name": "SmartSpeak - AI Content Transformation Suite",
+  "description": "Intelligent automated content transformation, multi-register English converter, word explorer, and paragraph synthesizer powered by Google Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
