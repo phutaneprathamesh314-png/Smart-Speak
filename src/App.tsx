@@ -9,7 +9,7 @@ import { HistoryTab } from './components/HistoryTab';
 import { TabType, UserProfile, HistoryItem } from './types';
 import { Sparkles, Shield, Cpu, BookOpen, Layers } from 'lucide-react';
 
-import defaultUserAvatar from './assets/images/default-avatar.svg';
+const defaultUserAvatar = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="%23475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('transform');
@@ -234,7 +234,7 @@ export default function App() {
       {/* Authentication Modal */}
       <AuthModal
         isOpen={isAuthOpen}
-        onClose={() => setIsAuthOpen5(false)}
+        onClose={() => setIsAuthOpen(false)}
         onSuccess={(newUser) => setUser(newUser)}
         defaultEmail="phutaneprathamesh314@gmail.com"
       />
