@@ -189,7 +189,7 @@ export interface WordExplorerResult {
 }
 
 // 4. Paragraph Studio Types
-export type ParagraphMode = 'summarize' | 'expand';
+export type ParagraphMode = 'summarize' | 'expand' | 'chat';
 
 export interface ParagraphStudioResult {
   mode: ParagraphMode;

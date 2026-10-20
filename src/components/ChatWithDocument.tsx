@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { DocumentInfo, ChatMessage, ChatSession, HistoryItem, UserProfile } from '../types';
 import { speakText } from '../utils/speech';
+import { QuotaNotice } from './QuotaNotice';
 
 interface ChatWithDocumentProps {
   document: DocumentInfo;
@@ -31,6 +32,12 @@ interface ChatWithDocumentProps {
   onChangeDocument: () => void;
   onSaveToHistory?: (item: Omit<HistoryItem, 'id' | 'timestamp'>) => void;
   user?: UserProfile | null;
+}
+
+interface QuotaDetails {
+  isQuota: boolean;
+  retryAfterSeconds: number;
+  suggestedAction?: string;
 }
 
 const STARTER_PROMPTS = [
@@ -60,11 +67,13 @@ export const ChatWithDocument: React.FC<ChatWithDocumentProps> = ({
   });
 
   const [inputQuestion, setInputQuestion] = useState('');
+  const [lastQuestion, setLastQuestion] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [selectedLanguage, setSelectedLanguage] = useState<'english' | 'hindi' | 'marathi' | 'gujarati' | 'tamil'>('english');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [quotaDetails, setQuotaDetails] = useState<QuotaDetails | null>(null);
   const [activePagePreview, setActivePagePreview] = useState<{ pageNumber: number; text: string } | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -97,6 +106,8 @@ export const ChatWithDocument: React.FC<ChatWithDocumentProps> = ({
     if (!questionText || isLoading) return;
 
     setErrorMessage(null);
+    setQuotaDetails(null);
+    setLastQuestion(questionText);
     setInputQuestion('');
 
     const userMessage: ChatMessage = {
@@ -132,6 +143,13 @@ export const ChatWithDocument: React.FC<ChatWithDocumentProps> = ({
 
       const json = await response.json();
       if (!response.ok || !json.success) {
+        if (json.isQuota || response.status === 429) {
+          setQuotaDetails({
+            isQuota: true,
+            retryAfterSeconds: json.retryAfterSeconds || 15,
+            suggestedAction: json.suggestedAction,
+          });
+        }
         throw new Error(json.error || 'Failed to generate response from Gemini');
       }
 
@@ -146,6 +164,7 @@ export const ChatWithDocument: React.FC<ChatWithDocumentProps> = ({
 
       const finalMessages = [...updatedMessages, assistantMessage];
       setMessages(finalMessages);
+      setQuotaDetails(null);
 
       // Save to SmartSpeak unified history
       if (onSaveToHistory) {
@@ -176,7 +195,7 @@ export const ChatWithDocument: React.FC<ChatWithDocumentProps> = ({
       const errorAssistantMsg: ChatMessage = {
         id: 'msg_err_' + Date.now(),
         sender: 'assistant',
-        text: 'Sorry, I encountered an issue retrieving the answer from the document. Please verify your query or retry.',
+        text: 'I encountered an issue retrieving the answer from the document due to AI rate limits or connection. Please retry.',
         timestamp: Date.now(),
         isError: true,
       };
@@ -204,7 +223,7 @@ export const ChatWithDocument: React.FC<ChatWithDocumentProps> = ({
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const handleSpeakText = (id: string, text: string, lang = 'english') => {
+  const handleSpeakText = async (id: string, text: string, lang = 'english') => {
     if (speakingId === id) {
       window.speechSynthesis?.cancel();
       setSpeakingId(null);
@@ -212,12 +231,11 @@ export const ChatWithDocument: React.FC<ChatWithDocumentProps> = ({
     }
     window.speechSynthesis?.cancel();
     setSpeakingId(id);
-    speakText(
-      text,
-      lang === 'hindi' ? 'hi-IN' : 'en-US',
-      () => setSpeakingId(null),
-      () => setSpeakingId(null)
-    );
+    try {
+      await speakText(text, lang === 'hindi' ? 'hi-IN' : 'en-US', 0.9);
+    } finally {
+      setSpeakingId(null);
+    }
   };
 
   const handleExportTranscript = () => {
@@ -614,19 +632,22 @@ export const ChatWithDocument: React.FC<ChatWithDocumentProps> = ({
         </div>
       )}
 
-      {/* Error Banner */}
+      {/* Error / Quota Banner */}
       {errorMessage && (
-        <div className="p-3 bg-rose-50 border-t border-rose-200 text-xs text-rose-800 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-            <span>{errorMessage}</span>
-          </div>
-          <button
-            onClick={() => setErrorMessage(null)}
-            className="text-xs font-semibold hover:underline ml-3"
-          >
-            Dismiss
-          </button>
+        <div className="p-3 border-t border-slate-200 bg-white">
+          <QuotaNotice
+            errorMessage={errorMessage}
+            isQuota={quotaDetails?.isQuota}
+            retryAfterSeconds={quotaDetails?.retryAfterSeconds || 15}
+            suggestedAction={quotaDetails?.suggestedAction}
+            onRetry={() => handleSendMessage(lastQuestion)}
+            isLoading={isLoading}
+            compact={true}
+            onDismiss={() => {
+              setErrorMessage(null);
+              setQuotaDetails(null);
+            }}
+          />
         </div>
       )}
 

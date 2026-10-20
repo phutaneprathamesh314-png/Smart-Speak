@@ -19,11 +19,17 @@ import {
   ShieldCheck,
   Network,
   X,
+  MessageSquare,
+  FileUp,
+  AlertCircle,
+  FileCheck,
 } from 'lucide-react';
-import { TransformResult, HistoryItem, MindMapNode, MeaningPreservationReport } from '../types';
+import { TransformResult, HistoryItem, MindMapNode, MeaningPreservationReport, DocumentInfo } from '../types';
 import { SlideViewer } from './SlideViewer';
 import { MindMapViewer } from './MindMapViewer';
 import { MeaningCheckerReport } from './MeaningCheckerReport';
+import { ChatWithDocument } from './ChatWithDocument';
+import { QuotaNotice } from './QuotaNotice';
 import { speakText } from '../utils/speech';
 
 interface ContentTransformTabProps {
@@ -31,6 +37,12 @@ interface ContentTransformTabProps {
   samples: {
     sampleTransformationParagraphs: string[];
   } | null;
+}
+
+interface QuotaDetails {
+  isQuota: boolean;
+  retryAfterSeconds: number;
+  suggestedAction?: string;
 }
 
 export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
@@ -43,16 +55,23 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
   );
 
   const [activeOutputTab, setActiveOutputTab] = useState<
-    'notes' | 'hindi' | 'qna' | 'slides' | 'mindmap' | 'accuracy'
+    'notes' | 'hindi' | 'qna' | 'slides' | 'mindmap' | 'chat' | 'accuracy'
   >('notes');
 
   const [enableMeaningCheck, setEnableMeaningCheck] = useState<boolean>(true);
   const [result, setResult] = useState<TransformResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [quotaDetails, setQuotaDetails] = useState<QuotaDetails | null>(null);
   const [engineNotice, setEngineNotice] = useState<string | null>(null);
   const [copiedSection, setCopiedSection] = useState<string | null>(null);
   const [isSpeakingHindi, setIsSpeakingHindi] = useState(false);
+
+  // Document & Chat states
+  const [activeDocument, setActiveDocument] = useState<DocumentInfo | null>(null);
+  const [isUploadingDocument, setIsUploadingDocument] = useState(false);
+  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
+  const [isChatActive, setIsChatActive] = useState(false);
 
   // Checker & Repair states
   const [isCheckingMeaning, setIsCheckingMeaning] = useState(false);
@@ -63,52 +82,159 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
 
   const wordCount = inputText.trim() ? inputText.trim().split(/\s+/).length : 0;
 
-  // Document File Upload Handler
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Document File Upload Handler (supports PDF, TXT, MD, JSON)
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const content = event.target?.result as string;
-      if (content) {
-        setInputText(content);
-        setErrorMessage('');
-      }
-    };
-    reader.onerror = () => {
-      setErrorMessage('Failed to read uploaded file.');
-    };
-    reader.readAsText(file);
+    setErrorMessage('');
+    setUploadNotice(null);
+
+    // Validate size (max 15MB)
+    if (file.size > 15 * 1024 * 1024) {
+      setErrorMessage('Selected file exceeds the 15MB size limit.');
+      e.target.value = '';
+      return;
+    }
+
+    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+
+    if (isPdf) {
+      setIsUploadingDocument(true);
+      setUploadNotice(`Extracting text from PDF: "${file.name}"...`);
+
+      const reader = new FileReader();
+      reader.onload = async (ev) => {
+        try {
+          const resultDataUri = ev.target?.result as string;
+          const base64 = resultDataUri.split(',')[1] || '';
+
+          const res = await fetch('/api/pdf/parse', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileData: base64,
+              fileName: file.name,
+              fileSize: file.size,
+            }),
+          });
+
+          const json = await res.json();
+          if (!res.ok || !json.success) {
+            if (json.isScannedPdf) {
+              setErrorMessage(
+                json.error ||
+                  'No selectable text could be extracted from this PDF. It appears to be an image-only scanned document without an embedded text layer.'
+              );
+            } else {
+              setErrorMessage(json.error || 'Failed to extract text from PDF document.');
+            }
+            setUploadNotice(null);
+            return;
+          }
+
+          const doc: DocumentInfo = {
+            type: 'pdf',
+            name: json.fileName || file.name,
+            size: json.fileSize || file.size,
+            totalPages: json.totalPages,
+            pages: json.pages,
+            fullText: json.text,
+            wordCount: json.wordCount,
+          };
+
+          setActiveDocument(doc);
+          setInputText(json.text);
+          setUploadNotice(`✓ "${file.name}" (${json.totalPages} pages) parsed successfully. Ready to chat or transform.`);
+        } catch (err: any) {
+          setErrorMessage('Error reading PDF file: ' + (err?.message || 'Unknown error'));
+          setUploadNotice(null);
+        } finally {
+          setIsUploadingDocument(false);
+        }
+      };
+
+      reader.onerror = () => {
+        setErrorMessage('Failed to read uploaded file.');
+        setIsUploadingDocument(false);
+        setUploadNotice(null);
+      };
+
+      reader.readAsDataURL(file);
+    } else {
+      // Plain text / Markdown / JSON
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const content = event.target?.result as string;
+        if (content) {
+          const doc: DocumentInfo = {
+            type: 'text',
+            name: file.name,
+            size: file.size,
+            fullText: content,
+            wordCount: content.split(/\s+/).filter(Boolean).length,
+          };
+          setActiveDocument(doc);
+          setInputText(content);
+          setUploadNotice(`✓ "${file.name}" loaded successfully.`);
+          setErrorMessage('');
+        }
+      };
+      reader.onerror = () => {
+        setErrorMessage('Failed to read uploaded file.');
+      };
+      reader.readAsText(file);
+    }
+
     // Reset file input
     e.target.value = '';
   };
 
   const handleTransform = async () => {
+    if (isLoading) return;
     if (!inputText.trim()) {
       setErrorMessage('Please enter or paste content to transform.');
+      setQuotaDetails(null);
       return;
     }
 
     setIsLoading(true);
     setErrorMessage('');
+    setQuotaDetails(null);
 
     try {
       const response = await fetch('/api/gemini/transform', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          content: inputText,
+          content: inputText.trim(),
           enableMeaningCheck,
         }),
       });
 
       const json = await response.json();
       if (!response.ok || !json.success) {
+        if (json.isQuota || response.status === 429) {
+          setQuotaDetails({
+            isQuota: true,
+            retryAfterSeconds: json.retryAfterSeconds || 15,
+            suggestedAction: json.suggestedAction,
+          });
+        }
         throw new Error(json.error || 'Failed to transform content');
       }
 
       setResult(json.data);
+      if (json.isQuota) {
+        setQuotaDetails({
+          isQuota: true,
+          retryAfterSeconds: json.retryAfterSeconds || 15,
+          suggestedAction: json.suggestedAction,
+        });
+      } else {
+        setQuotaDetails(null);
+      }
+
       if (json.fallbackNotice) {
         setEngineNotice(json.fallbackNotice);
       } else {
@@ -259,6 +385,37 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
     setIsSpeakingHindi(false);
   };
 
+  const handleStartChat = () => {
+    if (!inputText.trim()) {
+      setErrorMessage('Please enter or paste text, or upload a document to start chatting.');
+      return;
+    }
+    if (!activeDocument) {
+      setActiveDocument({
+        type: 'text',
+        name: 'Provided Text Document',
+        fullText: inputText,
+        wordCount: wordCount,
+      });
+    }
+    setActiveOutputTab('chat');
+    setIsChatActive(true);
+    setTimeout(() => {
+      const el = document.getElementById('output-deliverables-section');
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth' });
+      }
+    }, 60);
+  };
+
+  const handleClearDocument = () => {
+    setInputText('');
+    setActiveDocument(null);
+    setUploadNotice(null);
+    setErrorMessage('');
+    setIsChatActive(false);
+  };
+
   const getOutputTypeName = () => {
     switch (activeOutputTab) {
       case 'notes':
@@ -271,6 +428,8 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
         return 'Presentation Slides';
       case 'mindmap':
         return 'Text-to-Mind Map';
+      case 'chat':
+        return 'Chat with Text or PDF';
       default:
         return 'Transformed Content';
     }
@@ -329,22 +488,24 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
               type="file"
               ref={fileInputRef}
               onChange={handleFileUpload}
-              accept=".txt,.md,.json,.csv,.doc,.docx"
+              accept=".pdf,.txt,.md,.json,.csv,.doc,.docx"
               className="hidden"
             />
 
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="text-xs text-slate-600 hover:text-slate-900 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg px-2.5 py-1 flex items-center gap-1.5 transition-colors cursor-pointer"
-              title="Upload text or markdown document"
+              disabled={isUploadingDocument}
+              className="text-xs text-slate-700 hover:text-slate-900 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg px-2.5 py-1 flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              title="Upload PDF, text, or markdown document"
             >
-              <Upload className="w-3.5 h-3.5" />
-              <span>Upload Document</span>
+              <Upload className="w-3.5 h-3.5 text-sky-600" />
+              <span>{isUploadingDocument ? 'Extracting...' : 'Upload PDF / Text'}</span>
             </button>
 
             <button
-              onClick={() => setInputText('')}
+              onClick={handleClearDocument}
               className="text-xs text-slate-500 hover:text-slate-800 transition-colors px-2 py-1 cursor-pointer"
+              title="Clear input and active document"
             >
               Clear
             </button>
@@ -352,17 +513,111 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
         </div>
 
         <div className="p-4 sm:p-6">
+          {/* Active Uploaded Document Status Card */}
+          {activeDocument && (
+            <div className="mb-4 p-3.5 rounded-xl bg-slate-900 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md animate-fade-in">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-sky-500/20 text-sky-400 border border-sky-400/30 flex items-center justify-center font-bold text-xs shrink-0">
+                  {activeDocument.type === 'pdf' ? 'PDF' : 'DOC'}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-xs sm:text-sm text-white truncate max-w-xs sm:max-w-md">
+                      {activeDocument.name}
+                    </span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] bg-emerald-500/20 text-emerald-300 font-medium flex items-center gap-1">
+                      <Check className="w-3 h-3" /> Ready for Q&A
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 text-[11px] text-slate-400 mt-0.5">
+                    {activeDocument.totalPages && (
+                      <span>{activeDocument.totalPages} {activeDocument.totalPages === 1 ? 'Page' : 'Pages'}</span>
+                    )}
+                    {activeDocument.size && (
+                      <span>· {(activeDocument.size / 1024).toFixed(1)} KB</span>
+                    )}
+                    <span>· {activeDocument.wordCount || wordCount} words</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 self-end sm:self-auto">
+                <button
+                  type="button"
+                  onClick={handleStartChat}
+                  className="px-3 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
+                  title="Start chatting with this document"
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>Start Chat</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-colors cursor-pointer"
+                  title="Replace with a different file"
+                >
+                  Replace
+                </button>
+                <button
+                  type="button"
+                  onClick={handleClearDocument}
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950/60 text-slate-400 hover:text-rose-400 transition-colors cursor-pointer"
+                  title="Remove document"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Uploading progress notification */}
+          {isUploadingDocument && (
+            <div className="mb-4 p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-800 font-medium flex items-center gap-2 animate-fade-in">
+              <span className="w-3.5 h-3.5 border-2 border-sky-600 border-t-transparent rounded-full animate-spin shrink-0" />
+              <span>{uploadNotice || 'Reading document and extracting text...'}</span>
+            </div>
+          )}
+
+          {/* Success upload feedback notice */}
+          {uploadNotice && !isUploadingDocument && !activeDocument && (
+            <div className="mb-4 p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-medium flex items-center justify-between gap-2 animate-fade-in">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{uploadNotice}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setUploadNotice(null)}
+                className="text-emerald-700 hover:text-emerald-950 p-0.5 rounded cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           <textarea
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             rows={6}
-            placeholder="Paste any article, lecture note, research paper excerpt, or upload a document..."
+            placeholder="Paste any article, lecture note, research paper excerpt, or upload a PDF/text document..."
             className="w-full text-sm leading-relaxed text-slate-800 bg-transparent resize-y focus:outline-none placeholder:text-slate-400 font-normal"
           />
 
           {errorMessage && (
-            <div className="mt-3 p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 font-medium">
-              {errorMessage}
+            <div className="mt-3">
+              <QuotaNotice
+                errorMessage={errorMessage}
+                isQuota={quotaDetails?.isQuota}
+                retryAfterSeconds={quotaDetails?.retryAfterSeconds || 15}
+                suggestedAction={quotaDetails?.suggestedAction}
+                onRetry={handleTransform}
+                isLoading={isLoading}
+                onDismiss={() => {
+                  setErrorMessage('');
+                  setQuotaDetails(null);
+                }}
+              />
             </div>
           )}
 
@@ -376,22 +631,6 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
                 type="button"
                 onClick={() => setEngineNotice(null)}
                 className="text-amber-600 hover:text-amber-900 cursor-pointer p-0.5 rounded transition-colors"
-                title="Dismiss notice"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-
-          {engineNotice && (
-            <div className="mt-3 p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 font-medium flex items-center justify-between gap-3 animate-fade-in">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
-                <span>{engineNotice}</span>
-              </div>
-              <button
-                onClick={() => setEngineNotice(null)}
-                className="text-amber-600 hover:text-amber-900 cursor-pointer p-0.5 rounded hover:bg-amber-100 transition-colors"
                 title="Dismiss notice"
               >
                 <X className="w-3.5 h-3.5" />
@@ -418,31 +657,46 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
               </span>
             </label>
 
-            <button
-              onClick={handleTransform}
-              disabled={isLoading || !inputText.trim()}
-              className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold shadow-sm transition-all disabled:opacity-50 flex items-center gap-2 cursor-pointer ml-auto"
-            >
-              {isLoading ? (
-                <>
-                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  <span>Transforming & Generating Deliverables...</span>
-                </>
-              ) : (
-                <>
-                  <Sparkles className="w-4 h-4 text-sky-400" />
-                  <span>Transform Content</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </>
-              )}
-            </button>
+            <div className="flex items-center gap-2 ml-auto flex-wrap">
+              {/* Start Chat Button */}
+              <button
+                type="button"
+                onClick={handleStartChat}
+                disabled={!inputText.trim()}
+                className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-900 border border-slate-300 hover:border-slate-900 rounded-xl text-xs font-semibold shadow-xs transition-all disabled:opacity-50 flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed"
+                title="Open interactive chat with this document or text"
+              >
+                <MessageSquare className="w-4 h-4 text-sky-600" />
+                <span>Start Chat</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleTransform}
+                disabled={isLoading || !inputText.trim()}
+                className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold shadow-sm transition-all disabled:opacity-50 flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed"
+              >
+                {isLoading ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    <span>Transforming Deliverables...</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4 text-sky-400" />
+                    <span>Transform Content</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Output Deliverables Section */}
-      {result && (
-        <div className="space-y-6">
+      {/* Output Deliverables & Chat Section */}
+      {(result || isChatActive || activeOutputTab === 'chat') && (
+        <div id="output-deliverables-section" className="space-y-6">
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-fade-in">
             {/* Deliverables Sub-Navigation */}
             <div className="border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between overflow-x-auto scrollbar-none gap-2">
@@ -523,6 +777,27 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
                   <span>Text-to-Mind Map</span>
                 </button>
 
+                {/* FEATURE: Chat with Text or PDF */}
+                <button
+                  onClick={() => {
+                    setActiveOutputTab('chat');
+                    setIsChatActive(true);
+                  }}
+                  className={`px-3 py-2 text-xs font-semibold rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+                    activeOutputTab === 'chat'
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                  }`}
+                >
+                  <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Chat with Text or PDF</span>
+                  {activeDocument && (
+                    <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-sky-500/20 text-sky-300 font-mono">
+                      {activeDocument.type === 'pdf' ? `${activeDocument.totalPages || 1}p` : 'txt'}
+                    </span>
+                  )}
+                </button>
+
                 <button
                   onClick={() => setActiveOutputTab('accuracy')}
                   className={`px-3 py-2 text-xs font-semibold rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
@@ -537,8 +812,29 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
               </div>
             </div>
 
+            {/* If deliverables are not yet generated and user clicked notes, hindi, etc. */}
+            {!result && activeOutputTab !== 'chat' && (
+              <div className="p-12 text-center text-slate-500 space-y-3">
+                <Sparkles className="w-8 h-8 text-sky-500 mx-auto animate-pulse" />
+                <h4 className="text-sm font-bold text-slate-800">
+                  Deliverables Not Generated Yet
+                </h4>
+                <p className="text-xs text-slate-500 max-w-md mx-auto">
+                  Click <strong>Transform Content</strong> above to generate complete structured Short Notes, Hindi Translation, Q&A, Presentation Slides, and interactive Mind Map.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleTransform}
+                  disabled={isLoading || !inputText.trim()}
+                  className="mt-3 px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-semibold hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  Transform Content Now
+                </button>
+              </div>
+            )}
+
             {/* Sub-Tab 1: Short Notes */}
-            {activeOutputTab === 'notes' && (
+            {result && activeOutputTab === 'notes' && (
               <div className="p-6 space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
@@ -585,7 +881,7 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
             )}
 
             {/* Sub-Tab 2: Hindi Translation */}
-            {activeOutputTab === 'hindi' && (
+            {result && activeOutputTab === 'hindi' && (
               <div className="p-6 space-y-6">
                 <div className="flex items-center justify-between">
                   <div>
@@ -662,7 +958,7 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
             )}
 
             {/* Sub-Tab 3: Questions & Answers */}
-            {activeOutputTab === 'qna' && (
+            {result && activeOutputTab === 'qna' && (
               <div className="p-6 space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
@@ -732,7 +1028,7 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
             )}
 
             {/* Sub-Tab 4: Presentation Slides */}
-            {activeOutputTab === 'slides' && (
+            {result && activeOutputTab === 'slides' && (
               <div className="p-6">
                 <div className="mb-4">
                   <h3 className="text-base font-bold text-slate-900">Executive Presentation Slide Deck</h3>
@@ -752,7 +1048,7 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
             )}
 
             {/* Sub-Tab 5: Text-to-Mind Map */}
-            {activeOutputTab === 'mindmap' && (
+            {result && activeOutputTab === 'mindmap' && (
               <div className="p-6 space-y-4">
                 <div>
                   <h3 className="text-base font-bold text-slate-900">Interactive Text-to-Mind Map</h3>
@@ -778,8 +1074,27 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
               </div>
             )}
 
-            {/* Sub-Tab 6: Machine Learning & Accuracy Report */}
-            {activeOutputTab === 'accuracy' && (
+            {/* Sub-Tab 6: Chat with Text or PDF */}
+            {activeOutputTab === 'chat' && (
+              <div className="p-4 sm:p-6">
+                <ChatWithDocument
+                  document={
+                    activeDocument || {
+                      type: 'text',
+                      name: 'Provided Text Document',
+                      fullText: inputText,
+                      wordCount: wordCount,
+                    }
+                  }
+                  onClearDocument={handleClearDocument}
+                  onChangeDocument={() => fileInputRef.current?.click()}
+                  onSaveToHistory={onSaveToHistory}
+                />
+              </div>
+            )}
+
+            {/* Sub-Tab 7: Machine Learning & Accuracy Report */}
+            {result && activeOutputTab === 'accuracy' && (
               <div className="p-6 space-y-6">
                 <div className="border-b border-slate-100 pb-3">
                   <h3 className="text-base font-bold text-slate-900">
@@ -855,7 +1170,7 @@ export const ContentTransformTab: React.FC<ContentTransformTabProps> = ({
           </div>
 
           {/* FEATURE 2: Meaning Preservation Checker Report Section (displayed directly below generated content) */}
-          {enableMeaningCheck && (
+          {enableMeaningCheck && result && (
             <MeaningCheckerReport
               report={result.meaningReport || null}
               outputTypeName={getOutputTypeName()}

@@ -9,6 +9,8 @@ import { HistoryTab } from './components/HistoryTab';
 import { TabType, UserProfile, HistoryItem } from './types';
 import { Sparkles, Shield, Cpu, BookOpen, Layers } from 'lucide-react';
 
+import defaultUserAvatar from './assets/images/avatar_smartspeak_user_1792208196135.jpg';
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('transform');
   const [isAuthOpen, setIsAuthOpen] = useState(false);
@@ -24,7 +26,7 @@ export default function App() {
         id: 'usr_init_1',
         name: 'Prathamesh Phutane',
         emailOrPhone: 'phutaneprathamesh314@gmail.com',
-        avatarUrl: '/src/assets/images/avatar_smartspeak_user_1792208196135.jpg',
+        avatarUrl: defaultUserAvatar,
         provider: 'google',
         createdAt: new Date().toISOString(),
       };
@@ -165,7 +167,11 @@ export default function App() {
   };
 
   const handleLoadItem = (item: HistoryItem) => {
-    setActiveTab(item.category);
+    if (item.category === 'chat') {
+      setActiveTab('transform');
+    } else {
+      setActiveTab(item.category);
+    }
   };
 
   return (

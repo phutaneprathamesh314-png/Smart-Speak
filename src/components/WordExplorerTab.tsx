@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Search,
   Dice5,
@@ -13,9 +13,12 @@ import {
   Share2,
   Check,
   Copy,
+  RotateCcw,
+  AlertCircle,
 } from 'lucide-react';
 import { WordExplorerResult, HistoryItem } from '../types';
 import { speakText } from '../utils/speech';
+import { QuotaNotice } from './QuotaNotice';
 
 interface WordExplorerTabProps {
   onSaveToHistory: (item: Omit<HistoryItem, 'id' | 'timestamp'>) => void;
@@ -24,40 +27,82 @@ interface WordExplorerTabProps {
   } | null;
 }
 
+interface QuotaDetails {
+  isQuota: boolean;
+  retryAfterSeconds: number;
+  suggestedAction?: string;
+}
+
 export const WordExplorerTab: React.FC<WordExplorerTabProps> = ({
   onSaveToHistory,
   samples,
 }) => {
-  const [searchWord, setSearchWord] = useState('Serendipity');
+  const [searchWord, setSearchWord] = useState('Bibliophile');
   const [result, setResult] = useState<WordExplorerResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [quotaDetails, setQuotaDetails] = useState<QuotaDetails | null>(null);
+  const [lastSearchedWord, setLastSearchedWord] = useState('Bibliophile');
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [copied, setCopied] = useState(false);
 
+  const abortControllerRef = useRef<AbortController | null>(null);
+
   const exploreWord = async (wordToExplore: string) => {
-    if (!wordToExplore.trim()) {
-      setErrorMessage('Please enter a word to explore.');
+    const trimmed = wordToExplore ? wordToExplore.trim() : '';
+    if (!trimmed) {
+      setErrorMessage('Please enter an English word to explore.');
+      setQuotaDetails(null);
       return;
     }
 
-    setSearchWord(wordToExplore.trim());
+    // Prevent duplicate concurrent requests
+    if (isLoading) {
+      return;
+    }
+
+    // Abort any existing in-flight request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    setSearchWord(trimmed);
+    setLastSearchedWord(trimmed);
     setIsLoading(true);
     setErrorMessage('');
+    setQuotaDetails(null);
+
+    // Client-side 20 second timeout safeguard to guarantee spinner never hangs indefinitely
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, 20000);
 
     try {
       const response = await fetch('/api/gemini/explore-word', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ word: wordToExplore.trim() }),
+        body: JSON.stringify({ word: trimmed }),
+        signal: controller.signal,
       });
 
+      clearTimeout(timeoutId);
+
       const json = await response.json();
-      if (!response.ok || !json.success) {
-        throw new Error(json.error || 'Failed to explore word');
+      if (!response.ok || !json.success || !json.data) {
+        if (json.isQuota || response.status === 429) {
+          setQuotaDetails({
+            isQuota: true,
+            retryAfterSeconds: json.retryAfterSeconds || 15,
+            suggestedAction: json.suggestedAction,
+          });
+        }
+        throw new Error(json.error || 'Word exploration failed. Please try again.');
       }
 
       setResult(json.data);
+      setQuotaDetails(null);
 
       onSaveToHistory({
         category: 'word-explorer',
@@ -70,14 +115,22 @@ export const WordExplorerTab: React.FC<WordExplorerTabProps> = ({
         },
       });
     } catch (err: any) {
-      setErrorMessage(err.message || 'Error communicating with Gemini.');
+      if (err.name === 'AbortError') {
+        setErrorMessage('The word analysis request timed out or was cancelled. Click Retry to re-run.');
+      } else {
+        setErrorMessage(err.message || 'Error communicating with dictionary service. Please retry.');
+      }
     } finally {
+      clearTimeout(timeoutId);
       setIsLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
   const handleRandomWord = () => {
+    if (isLoading) return;
     const list = samples?.sampleWords || [
+      'Bibliophile',
       'Serendipity',
       'Ephemeral',
       'Quintessential',
@@ -88,15 +141,23 @@ export const WordExplorerTab: React.FC<WordExplorerTabProps> = ({
       'Paradigm',
       'Cognizant',
       'Magnanimous',
+      'Alacrity',
     ];
     const chosen = list[Math.floor(Math.random() * list.length)];
+    setSearchWord(chosen);
     exploreWord(chosen);
   };
 
   const handleSpeak = async (word: string) => {
+    if (isPlayingAudio) return;
     setIsPlayingAudio(true);
-    await speakText(word, 'en-US', 0.85);
-    setIsPlayingAudio(false);
+    try {
+      await speakText(word, 'en-US', 0.85);
+    } catch (err) {
+      console.warn('Speech playback failed', err);
+    } finally {
+      setIsPlayingAudio(false);
+    }
   };
 
   const handleCopyDefinition = () => {
@@ -122,9 +183,10 @@ export const WordExplorerTab: React.FC<WordExplorerTabProps> = ({
             </p>
           </div>
           <button
+            type="button"
             onClick={handleRandomWord}
             disabled={isLoading}
-            className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors flex items-center gap-2 self-start md:self-auto cursor-pointer"
+            className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors flex items-center gap-2 self-start md:self-auto cursor-pointer disabled:opacity-50"
           >
             <Dice5 className="w-4 h-4 text-slate-600" />
             <span>Discover Random Word</span>
@@ -137,6 +199,7 @@ export const WordExplorerTab: React.FC<WordExplorerTabProps> = ({
         <form
           onSubmit={(e) => {
             e.preventDefault();
+            if (isLoading) return;
             exploreWord(searchWord);
           }}
           className="flex flex-col sm:flex-row gap-3"
@@ -147,8 +210,9 @@ export const WordExplorerTab: React.FC<WordExplorerTabProps> = ({
               type="text"
               value={searchWord}
               onChange={(e) => setSearchWord(e.target.value)}
-              placeholder="Enter any word (e.g., Ephemeral, Perspicacious, Ubiquitous)..."
-              className="w-full pl-10 pr-4 py-2.5 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-transparent text-slate-900"
+              placeholder="Enter any word (e.g., Bibliophile, Serendipity, Ephemeral)..."
+              disabled={isLoading}
+              className="w-full pl-10 pr-4 py-2.5 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-transparent text-slate-900 disabled:bg-slate-50"
             />
           </div>
 
@@ -174,13 +238,21 @@ export const WordExplorerTab: React.FC<WordExplorerTabProps> = ({
         {/* Quick word tags */}
         <div className="mt-4 flex flex-wrap items-center gap-2 pt-3 border-t border-slate-100">
           <span className="text-xs text-slate-400 font-medium">Trending Lexicon:</span>
-          {['Quintessential', 'Eloquent', 'Ubiquitous', 'Resilience', 'Perspicacious', 'Alacrity'].map(
+          {['Bibliophile', 'Quintessential', 'Eloquent', 'Ubiquitous', 'Resilience', 'Perspicacious', 'Alacrity'].map(
             (w) => (
               <button
                 key={w}
                 type="button"
-                onClick={() => exploreWord(w)}
-                className="px-2.5 py-1 text-xs rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors"
+                disabled={isLoading}
+                onClick={() => {
+                  setSearchWord(w);
+                  exploreWord(w);
+                }}
+                className={`px-2.5 py-1 text-xs rounded-lg transition-colors cursor-pointer ${
+                  searchWord.toLowerCase() === w.toLowerCase()
+                    ? 'bg-slate-900 text-white font-medium'
+                    : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                } disabled:opacity-50`}
               >
                 {w}
               </button>
@@ -188,9 +260,21 @@ export const WordExplorerTab: React.FC<WordExplorerTabProps> = ({
           )}
         </div>
 
+        {/* Quota / Error notification with live countdown and Retry button */}
         {errorMessage && (
-          <div className="mt-3 p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 font-medium">
-            {errorMessage}
+          <div className="mt-4">
+            <QuotaNotice
+              errorMessage={errorMessage}
+              isQuota={quotaDetails?.isQuota}
+              retryAfterSeconds={quotaDetails?.retryAfterSeconds || 15}
+              suggestedAction={quotaDetails?.suggestedAction}
+              onRetry={() => exploreWord(lastSearchedWord || searchWord)}
+              isLoading={isLoading}
+              onDismiss={() => {
+                setErrorMessage('');
+                setQuotaDetails(null);
+              }}
+            />
           </div>
         )}
       </div>

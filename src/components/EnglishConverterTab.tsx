@@ -23,12 +23,19 @@ import {
   PhraseModeType,
 } from '../types';
 import { speakText, stopSpeaking } from '../utils/speech';
+import { QuotaNotice } from './QuotaNotice';
 
 interface EnglishConverterTabProps {
   onSaveToHistory: (item: Omit<HistoryItem, 'id' | 'timestamp'>) => void;
   samples: {
     sampleSentences: Record<string, string[]>;
   } | null;
+}
+
+interface QuotaDetails {
+  isQuota: boolean;
+  retryAfterSeconds: number;
+  suggestedAction?: string;
 }
 
 export const EnglishConverterTab: React.FC<EnglishConverterTabProps> = ({
@@ -46,6 +53,7 @@ export const EnglishConverterTab: React.FC<EnglishConverterTabProps> = ({
   const [result, setResult] = useState<ConvertResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [quotaDetails, setQuotaDetails] = useState<QuotaDetails | null>(null);
   const [isCopied, setIsCopied] = useState(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
 
@@ -83,20 +91,23 @@ export const EnglishConverterTab: React.FC<EnglishConverterTabProps> = ({
   };
 
   const handleConvert = async () => {
+    if (isLoading) return;
     if (!inputSentence.trim()) {
       setErrorMessage('Please enter a sentence to convert.');
+      setQuotaDetails(null);
       return;
     }
 
     setIsLoading(true);
     setErrorMessage('');
+    setQuotaDetails(null);
 
     try {
       const response = await fetch('/api/gemini/convert', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          inputSentence,
+          inputSentence: inputSentence.trim(),
           situation,
           explanationLanguage,
           dialect,
@@ -106,10 +117,18 @@ export const EnglishConverterTab: React.FC<EnglishConverterTabProps> = ({
 
       const json = await response.json();
       if (!response.ok || !json.success) {
+        if (json.isQuota || response.status === 429) {
+          setQuotaDetails({
+            isQuota: true,
+            retryAfterSeconds: json.retryAfterSeconds || 15,
+            suggestedAction: json.suggestedAction,
+          });
+        }
         throw new Error(json.error || 'Failed to convert sentence');
       }
 
       setResult(json.data);
+      setQuotaDetails(null);
 
       onSaveToHistory({
         category: 'converter',
@@ -259,9 +278,18 @@ export const EnglishConverterTab: React.FC<EnglishConverterTabProps> = ({
         </div>
 
         {errorMessage && (
-          <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 font-medium">
-            {errorMessage}
-          </div>
+          <QuotaNotice
+            errorMessage={errorMessage}
+            isQuota={quotaDetails?.isQuota}
+            retryAfterSeconds={quotaDetails?.retryAfterSeconds || 15}
+            suggestedAction={quotaDetails?.suggestedAction}
+            onRetry={handleConvert}
+            isLoading={isLoading}
+            onDismiss={() => {
+              setErrorMessage('');
+              setQuotaDetails(null);
+            }}
+          />
         )}
 
         {/* Action Button */}

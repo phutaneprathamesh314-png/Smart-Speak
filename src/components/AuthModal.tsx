@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, Mail, Lock, User, Phone, CheckCircle, ArrowRight, ShieldCheck } from 'lucide-react';
 import { UserProfile } from '../types';
+import defaultUserAvatar from '../assets/images/avatar_smartspeak_user_1792208196135.jpg';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -87,7 +88,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         id: 'g_' + Date.now(),
         name: 'Prathamesh Phutane',
         emailOrPhone: defaultEmail,
-        avatarUrl: '/src/assets/images/avatar_smartspeak_user_1792208196135.jpg',
+        avatarUrl: defaultUserAvatar,
         provider: 'google',
         createdAt: new Date().toISOString(),
       };

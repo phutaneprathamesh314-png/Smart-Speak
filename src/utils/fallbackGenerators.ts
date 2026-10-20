@@ -1,5 +1,5 @@
 import { resolveSlideImage } from './slideImages.ts';
-import { MindMapNode } from '../types';
+import { MindMapNode } from '../types/index.ts';
 
 /**
  * Smart Local Semantic Engine & Fallback Generator

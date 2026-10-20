@@ -112,9 +112,13 @@ export const Header: React.FC<HeaderProps> = ({
                       src={user.avatarUrl}
                       alt={user.name}
                       referrerPolicy="no-referrer"
+                      onError={(e) => {
+                        (e.currentTarget as HTMLElement).style.display = 'none';
+                      }}
                       className="w-6 h-6 rounded-full object-cover border border-slate-200"
                     />
-                  ) : (
+                  ) : null}
+                  {!user.avatarUrl && (
                     <div className="w-6 h-6 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center font-semibold text-xs">
                       {user.name.charAt(0).toUpperCase()}
                     </div>

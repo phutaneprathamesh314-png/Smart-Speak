@@ -166,6 +166,16 @@ export const HistoryTab: React.FC<HistoryTabProps> = ({
           >
             Paragraphs
           </button>
+          <button
+            onClick={() => setSelectedCategory('chat')}
+            className={`px-3 py-1 text-xs font-medium rounded-md whitespace-nowrap transition-colors cursor-pointer ${
+              selectedCategory === 'chat'
+                ? 'bg-white text-slate-900 shadow-sm font-semibold'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            Document Chats
+          </button>
         </div>
       </div>
 

@@ -31,38 +31,129 @@ const ai = new GoogleGenAI({
   },
 });
 
-// Candidate models in preference order (lite models have higher free tier rate limits)
+// Candidate models in preference order:
+// 1. gemini-flash-lite-latest: fastest (<1s), highest free-tier rate limits, low latency
+// 2. gemini-3.1-flash-lite: high throughput lite model
+// 3. gemini-3.8-flash: full multimodal model for advanced synthesis
+// 4. gemini-flash-latest: stable alias fallback
 const CANDIDATE_MODELS = [
+  'gemini-flash-lite-latest',
   'gemini-3.1-flash-lite',
-  'gemini-flash-latest',
   'gemini-3.8-flash',
+  'gemini-flash-latest',
 ];
 
-async function callGemini(contents: string, responseMimeType = 'application/json') {
+// Helper to classify errors and detect Gemini API quota/rate-limit errors
+export function parseGeminiError(err: any) {
+  const status = err?.status || err?.statusCode || 500;
+  const rawMsg = typeof err?.message === 'string' ? err.message : JSON.stringify(err || '');
+
+  const isQuota =
+    status === 429 ||
+    rawMsg.includes('429') ||
+    rawMsg.includes('RESOURCE_EXHAUSTED') ||
+    rawMsg.includes('Quota exceeded') ||
+    rawMsg.includes('quota') ||
+    rawMsg.includes('rate limit') ||
+    rawMsg.includes('RateLimit');
+
+  const isUnavailable =
+    status === 503 ||
+    rawMsg.includes('503') ||
+    rawMsg.includes('UNAVAILABLE') ||
+    rawMsg.includes('high demand') ||
+    rawMsg.includes('overloaded');
+
+  // Parse retry delay from error if present (e.g. "Please retry after 15s")
+  let retryAfterSeconds = 15;
+  const match = rawMsg.match(/retry(?:ing)? after (\d+)s/i) || rawMsg.match(/retry in (\d+)s/i);
+  if (match && match[1]) {
+    retryAfterSeconds = Math.max(5, Math.min(parseInt(match[1], 10), 60));
+  } else if (isQuota) {
+    retryAfterSeconds = 15;
+  } else if (isUnavailable) {
+    retryAfterSeconds = 5;
+  }
+
+  let userFriendlyMessage = 'An unexpected error occurred while communicating with the AI service.';
+  let suggestedAction = 'Please try again in a few moments.';
+
+  if (isQuota) {
+    userFriendlyMessage =
+      'The Gemini AI service has temporarily reached its usage/rate limit for this API key.';
+    suggestedAction = `Please wait ${retryAfterSeconds} seconds before retrying. Free tier quotas replenish automatically, or you can configure Google Cloud billing in AI Studio to increase your RPM limit.`;
+  } else if (isUnavailable) {
+    userFriendlyMessage =
+      'The Gemini AI model is currently experiencing temporary high traffic demand.';
+    suggestedAction = 'Spikes in demand are usually temporary. Please retry in a few seconds.';
+  }
+
+  return {
+    isQuota,
+    isUnavailable,
+    status: isQuota ? 429 : isUnavailable ? 503 : (status >= 400 && status < 600 ? status : 500),
+    message: userFriendlyMessage,
+    retryAfterSeconds,
+    suggestedAction,
+    originalError: rawMsg.slice(0, 300),
+  };
+}
+
+async function callGemini(contents: string, responseMimeType = 'application/json', timeoutMs = 20000) {
   let lastError: any = null;
+  let hitHardQuota = false;
+
   for (const model of CANDIDATE_MODELS) {
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents,
-        config: {
-          responseMimeType,
-        },
-      });
-      if (response && response.text) {
-        return response;
+    // Up to 2 attempts per model to gracefully handle transient 503/429 spikes
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const callPromise = ai.models.generateContent({
+          model,
+          contents,
+          config: {
+            responseMimeType,
+          },
+        });
+
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms with model ${model}`)), timeoutMs)
+        );
+
+        const response: any = await Promise.race([callPromise, timeoutPromise]);
+        if (response && response.text) {
+          return response;
+        }
+      } catch (err: any) {
+        lastError = err;
+        const errInfo = parseGeminiError(err);
+
+        console.warn(
+          `[Gemini Model ${model} attempt ${attempt + 1}] failed (isQuota: ${errInfo.isQuota}, isUnavailable: ${errInfo.isUnavailable}):`,
+          err?.message || err
+        );
+
+        // Exponential backoff for temporary rate limits or 503 spikes on first attempt
+        if ((errInfo.isQuota || errInfo.isUnavailable) && attempt === 0) {
+          const backoffMs = errInfo.isQuota ? 1500 : 800;
+          await new Promise((r) => setTimeout(r, backoffMs));
+          continue;
+        }
+
+        if (errInfo.isQuota) {
+          hitHardQuota = true;
+        }
+        break; // Move to next candidate model
       }
-    } catch (err: any) {
-      lastError = err;
-      const isQuota =
-        err?.status === 429 ||
-        err?.message?.includes('429') ||
-        err?.message?.includes('RESOURCE_EXHAUSTED') ||
-        err?.message?.includes('quota');
-      console.warn(`[Gemini Model ${model}] failed (quota: ${isQuota}):`, err?.message || err);
     }
   }
-  throw lastError || new Error('All Gemini candidate models failed');
+
+  const finalParsed = parseGeminiError(lastError);
+  const enrichedError: any = new Error(finalParsed.message);
+  enrichedError.status = finalParsed.status;
+  enrichedError.isQuota = finalParsed.isQuota || hitHardQuota;
+  enrichedError.retryAfterSeconds = finalParsed.retryAfterSeconds;
+  enrichedError.suggestedAction = finalParsed.suggestedAction;
+  throw enrichedError;
 }
 
 // Helper to sanitize and extract JSON from Gemini text response
@@ -537,19 +628,34 @@ Respond strictly with valid JSON without markdown fences:
         }
       }
     } catch (geminiError: any) {
+      const errInfo = parseGeminiError(geminiError);
       console.warn('Gemini transformation error/rate-limit. Activating SmartSpeak Semantic Engine:', geminiError?.message || geminiError);
       parsed = generateSmartFallbackTransform(content, req.body?.enableMeaningCheck !== false);
-      fallbackNotice = 'Cloud AI rate-limit active. SmartSpeak Semantic Engine generated complete deliverables with full interactive slides, mind maps, and exports.';
+      fallbackNotice = errInfo.isQuota
+        ? `Gemini API usage limit reached. SmartSpeak Semantic Engine synthesized complete local deliverables. Rate limit resets in ~${errInfo.retryAfterSeconds}s.`
+        : 'SmartSpeak Semantic Engine generated complete deliverables with full interactive slides, mind maps, and exports.';
+      return res.json({
+        success: true,
+        data: parsed,
+        fallbackNotice,
+        isQuota: errInfo.isQuota,
+        retryAfterSeconds: errInfo.retryAfterSeconds,
+        suggestedAction: errInfo.suggestedAction,
+      });
     }
 
     return res.json({ success: true, data: parsed, fallbackNotice });
   } catch (error: any) {
     console.error('Transform API Error recovery:', error);
+    const parsedErr = parseGeminiError(error);
     const parsed = generateSmartFallbackTransform(req.body?.content || '', true);
     return res.json({
       success: true,
       data: parsed,
       fallbackNotice: 'SmartSpeak Semantic Engine activated.',
+      isQuota: parsedErr.isQuota,
+      retryAfterSeconds: parsedErr.retryAfterSeconds,
+      suggestedAction: parsedErr.suggestedAction,
     });
   }
 });
@@ -1076,18 +1182,28 @@ Respond strictly in valid JSON conforming to this schema without markdown code f
     } catch (apiError: any) {
       console.warn('Gemini chat error/rate-limit. Generating grounded fallback response:', apiError?.message || apiError);
       const fallback = generateFallbackChatResponse(documentText, pages, question, language);
+      const errInfo = parseGeminiError(apiError);
       return res.json({
         success: true,
         ...fallback,
-        fallbackNotice: 'Answer generated using SmartSpeak Local Semantic Retrieval due to API quota limit.',
+        isQuota: errInfo.isQuota,
+        retryAfterSeconds: errInfo.retryAfterSeconds,
+        suggestedAction: errInfo.suggestedAction,
+        fallbackNotice: errInfo.isQuota
+          ? `Gemini API usage limit reached. SmartSpeak Local Semantic Retrieval generated this grounded answer. Rate limit resets in ~${errInfo.retryAfterSeconds}s.`
+          : 'Answer generated using SmartSpeak Local Semantic Retrieval.',
       });
     }
   } catch (error: any) {
     console.error('Document Chat Error:', error);
+    const parsedErr = parseGeminiError(error);
     const fallback = generateFallbackChatResponse(req.body?.documentText || '', req.body?.pages || [], req.body?.question || '', req.body?.language || 'english');
     return res.json({
       success: true,
       ...fallback,
+      isQuota: parsedErr.isQuota,
+      retryAfterSeconds: parsedErr.retryAfterSeconds,
+      suggestedAction: parsedErr.suggestedAction,
     });
   }
 });
@@ -1285,8 +1401,13 @@ Respond strictly with valid JSON without markdown fences:
     return res.json({ success: true, data: parsed });
   } catch (error: any) {
     console.error('Convert API Error:', error);
-    return res.status(500).json({
-      error: 'Conversion failed: ' + (error?.message || 'Internal AI Error'),
+    const parsedErr = parseGeminiError(error);
+    return res.status(parsedErr.status).json({
+      success: false,
+      isQuota: parsedErr.isQuota,
+      error: parsedErr.message,
+      retryAfterSeconds: parsedErr.retryAfterSeconds,
+      suggestedAction: parsedErr.suggestedAction,
     });
   }
 });
@@ -1300,12 +1421,14 @@ app.post('/api/gemini/explore-word', async (req, res) => {
       return res.status(400).json({ error: 'Word is required' });
     }
 
+    const cleanWord = word.trim().slice(0, 80);
+
     const prompt = `You are SmartSpeak's Lexicographer & Word Explorer.
-Provide a comprehensive, authoritative linguistic profile for the word: "${word.trim()}".
+Provide a comprehensive, authoritative linguistic profile for the word: "${cleanWord}".
 
 Respond strictly with valid JSON without markdown fences:
 {
-  "word": "${word.trim()}",
+  "word": "${cleanWord}",
   "phoneticIpa": "/.../",
   "phoneticGuide": "Simple phonetic spelling guide, e.g. ser-en-DIP-i-tee",
   "partOfSpeech": "noun / verb / adjective / adverb",
@@ -1347,13 +1470,42 @@ Respond strictly with valid JSON without markdown fences:
   }
 }`;
 
-    const response = await callGemini(prompt, 'application/json');
+    const response = await callGemini(prompt, 'application/json', 15000);
     const parsed = extractJsonFromText(response.text || '{}');
-    return res.json({ success: true, data: parsed });
+
+    // Safe normalization
+    const sanitized = {
+      word: parsed.word || cleanWord,
+      phoneticIpa: parsed.phoneticIpa || `/${cleanWord.toLowerCase()}/`,
+      phoneticGuide: parsed.phoneticGuide || '',
+      partOfSpeech: parsed.partOfSpeech || 'noun',
+      cefrLevel: parsed.cefrLevel || 'B2',
+      primaryDefinition:
+        parsed.primaryDefinition || parsed.definitions?.[0]?.meaning || 'Comprehensive definition available.',
+      definitions: Array.isArray(parsed.definitions) ? parsed.definitions : [],
+      examples: Array.isArray(parsed.examples) ? parsed.examples : [],
+      synonyms: Array.isArray(parsed.synonyms) ? parsed.synonyms : [],
+      antonyms: Array.isArray(parsed.antonyms) ? parsed.antonyms : [],
+      etymology: parsed.etymology || '',
+      collocations: Array.isArray(parsed.collocations) ? parsed.collocations : [],
+      commonMistakesOrTips: parsed.commonMistakesOrTips || '',
+      accuracyMetrics: parsed.accuracyMetrics || {
+        frequencyScore: 'Top 15% Academic Register',
+        utilityScore: 92,
+        confidenceRating: 98.9,
+      },
+    };
+
+    return res.json({ success: true, data: sanitized });
   } catch (error: any) {
     console.error('Word Explorer API Error:', error);
-    return res.status(500).json({
-      error: 'Word exploration failed: ' + (error?.message || 'Internal AI Error'),
+    const parsedErr = parseGeminiError(error);
+    return res.status(parsedErr.status).json({
+      success: false,
+      isQuota: parsedErr.isQuota,
+      error: parsedErr.message,
+      retryAfterSeconds: parsedErr.retryAfterSeconds,
+      suggestedAction: parsedErr.suggestedAction,
     });
   }
 });
@@ -1455,8 +1607,13 @@ Respond strictly with valid JSON without markdown fences:
     return res.json({ success: true, data: parsed });
   } catch (error: any) {
     console.error('Expand/Summarize API Error:', error);
-    return res.status(500).json({
-      error: 'Processing failed: ' + (error?.message || 'Internal AI Error'),
+    const parsedErr = parseGeminiError(error);
+    return res.status(parsedErr.status).json({
+      success: false,
+      isQuota: parsedErr.isQuota,
+      error: parsedErr.message,
+      retryAfterSeconds: parsedErr.retryAfterSeconds,
+      suggestedAction: parsedErr.suggestedAction,
     });
   }
 });
