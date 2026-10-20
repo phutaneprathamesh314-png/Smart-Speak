@@ -9,7 +9,7 @@ import { HistoryTab } from './components/HistoryTab';
 import { TabType, UserProfile, HistoryItem } from './types';
 import { Sparkles, Shield, Cpu, BookOpen, Layers } from 'lucide-react';
 
-import defaultUserAvatar from './assets/images/avatar_smartspeak_user_1792208196135.jpg';
+import defaultUserAvatar from './assets/images/default-avatar.svg';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('transform');
@@ -139,16 +139,6 @@ export default function App() {
     localStorage.setItem('smartspeak_history', JSON.stringify(history));
   }, [history]);
 
-  // Load sample content from backend on mount
-  useEffect(() => {
-    fetch('/api/samples')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data) setSamples(data);
-      })
-      .catch((err) => console.log('Could not load samples', err));
-  }, []);
-
   const handleSaveToHistory = (item: Omit<HistoryItem, 'id' | 'timestamp'>) => {
     const newItem: HistoryItem = {
       ...item,
@@ -244,7 +234,7 @@ export default function App() {
       {/* Authentication Modal */}
       <AuthModal
         isOpen={isAuthOpen}
-        onClose={() => setIsAuthOpen(false)}
+        onClose={() => setIsAuthOpen5(false)}
         onSuccess={(newUser) => setUser(newUser)}
         defaultEmail="phutaneprathamesh314@gmail.com"
       />
