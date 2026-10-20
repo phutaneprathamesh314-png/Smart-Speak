@@ -19,11 +19,21 @@ export const handler: Handler = async (event) => {
   }
 
   try {
-    const { prompt } = JSON.parse(event.body || '{}');
+    const body = JSON.parse(event.body || '{}');
+    // Accept either body.prompt, body.contents, or body directly if it's a string
+    const promptText = body.prompt || body.contents || (typeof body === 'string' ? body : '');
+
+    if (!promptText) {
+      return {
+        statusCode: 400,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: 'Prompt or contents is required' }),
+      };
+    }
 
     const response = await ai.models.generateContent({
       model: 'gemini-1.5-flash',
-      contents: prompt,
+      contents: promptText,
     });
 
     return {
