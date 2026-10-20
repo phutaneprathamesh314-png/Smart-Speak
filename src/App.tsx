@@ -7,8 +7,9 @@ import { WordExplorerTab } from './components/WordExplorerTab';
 import { ParagraphStudioTab } from './components/ParagraphStudioTab';
 import { HistoryTab } from './components/HistoryTab';
 import { TabType, UserProfile, HistoryItem } from './types';
+import { Sparkles, Shield, Cpu, BookOpen, Layers } from 'lucide-react';
 
-const defaultUserAvatar = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="%23475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
+import defaultUserAvatar from './assets/images/avatar_smartspeak_user_1792208196135.jpg';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('transform');
@@ -20,7 +21,7 @@ export default function App() {
     try {
       const saved = localStorage.getItem('smartspeak_user');
       if (saved) return JSON.parse(saved);
-      // Pre-seed with user profile for seamless immediate access
+      // Pre-seed with user's verified profile for seamless immediate access
       return {
         id: 'usr_init_1',
         name: 'Prathamesh Phutane',
@@ -138,6 +139,16 @@ export default function App() {
     localStorage.setItem('smartspeak_history', JSON.stringify(history));
   }, [history]);
 
+  // Load sample content from backend on mount
+  useEffect(() => {
+    fetch('/api/samples')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) setSamples(data);
+      })
+      .catch((err) => console.log('Could not load samples', err));
+  }, []);
+
   const handleSaveToHistory = (item: Omit<HistoryItem, 'id' | 'timestamp'>) => {
     const newItem: HistoryItem = {
       ...item,
@@ -240,3 +251,4 @@ export default function App() {
     </div>
   );
 }
+
